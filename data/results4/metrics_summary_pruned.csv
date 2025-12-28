@@ -1,0 +1,2 @@
+window,d,num_alive,num_dead,sparsity_ppmi,corr_ppmi,drift_ppmi,sci_ppmi,corr_svd,drift_svd,sci_svd
+7,300,26247,3753,0.029558087777777776,0.5715925285775816,0.0,0.7274055051596855,0.6516391008168096,0.0,0.7890817073712348

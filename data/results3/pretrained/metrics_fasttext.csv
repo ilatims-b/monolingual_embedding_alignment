@@ -1,0 +1,2 @@
+embedding_type,embedding_path,vocab_size,embedding_dim,wordsim_correlation,wordsim_pairs
+fasttext,./wiki.en.vec,2518927,300,0.7341471259507981,335

@@ -1,0 +1,2 @@
+embedding_type,vocab_size,dim,wordsim353,wordsim_n,analogy_acc,analogy_n,outlier_acc,outlier_n
+fasttext,30000,300,0.7407824784972256,326,0.7367688022284122,7180,0.6,10
