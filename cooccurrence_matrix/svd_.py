@@ -1,3 +1,4 @@
+#for pruned svd and ppmi, with semantic/stability eval
 import os
 import numpy as np
 import scipy.sparse as sp
@@ -10,8 +11,8 @@ BASE_PATH = "./data/corpora/eng_wikipedia_2016_1M"
 WORDS_PATH = os.path.join(BASE_PATH, "eng_wikipedia_2016_1M-words.txt")
 WORDSIM_PATH = "./data/wordsim353.csv"
 
-INPUT_MATRICES_DIR = "./data/results3/matrices"   # existing PPMI
-OUTPUT_DIR = "./data/results4"                    # NEW: pruned results
+INPUT_MATRICES_DIR = "./data/results3/matrices"   
+OUTPUT_DIR = "./data/results4"                    
 PLOTS_DIR = os.path.join(OUTPUT_DIR, "plots")
 MATRICES_DIR = os.path.join(OUTPUT_DIR, "matrices")
 os.makedirs(PLOTS_DIR, exist_ok=True)
@@ -59,7 +60,10 @@ class MatrixTransformer:
 
         # pruned PPMI (only alive rows)
         ppmi_pruned = ppmi_mat[alive_indices]
-
+        ppmi_pruned_path = os.path.join(
+            MATRICES_DIR, f"ppmi_pruned_w{window_size}.npz"
+        )
+        sp.save_npz(ppmi_pruned_path, ppmi_pruned)
         # SVD on pruned matrix
         k = min(fixed_d, ppmi_pruned.shape[1] - 1)
         print(f"[SVD] TruncatedSVD on shape {ppmi_pruned.shape} with d={k}")
@@ -132,12 +136,12 @@ def run_all():
     vocab, inverse_vocab = load_vocab_full(WORDS_PATH, top_k=30000)
     evaluator = MetricEvaluator(vocab)   # for PPMI metrics on full vocab
 
-    windows = [7]  # or [5,6,7,8,9,10]
+    windows = [7] 
     for w in windows:
         print(f"\n=== Window {w} ===")
         ppmi_mat = MatrixTransformer.load_ppmi(w)
 
-        # metrics on full PPMI (optional)
+        # metrics on full PPMI 
         corr_ppmi, _ = evaluator.evaluate_wordsim(ppmi_mat, WORDSIM_PATH)
         print(f"[Metric] PPMI WordSim corr={corr_ppmi:.4f}")
 
@@ -150,7 +154,9 @@ def run_all():
         pruned_vocab_map = {wrd: i for i, wrd in enumerate(vocab_pruned)}
         evaluator_pruned = MetricEvaluator(pruned_vocab_map)
         corr_svd, _ = evaluator_pruned.evaluate_wordsim(emb_pruned, WORDSIM_PATH)
+        corr_ppmi_pruned, _ = evaluator_pruned.evaluate_wordsim(ppmi_pruned, WORDSIM_PATH)
         print(f"[Metric] SVD(pruned) WordSim corr={corr_svd:.4f}")
+        print(f"[Metric] PPMI(pruned) WordSim corr={corr_ppmi_pruned:.4f}")
 
 
 if __name__ == "__main__":

@@ -202,21 +202,21 @@ def export_matrix(matrix, vocab_list, output_prefix, max_rows=10000):
     print(f"  Raw vectors:     {vecs_path}")
     print(f"  Normalized vecs: {vecs_norm_path}")
 
-    # 1) metadata
+    # metadata
     with open(meta_path, "w", encoding="utf-8") as f:
         for i in range(n_rows):
             f.write(vocab_list[i] + "\n")
 
-    # 2) slice matrix (dense)
+    # slice matrix (dense)
     if sp.issparse(matrix):
         sub_matrix = matrix[:n_rows].toarray()
     else:
         sub_matrix = matrix[:n_rows]
 
-    # 3) save raw vectors
+    # save raw vectors
     np.savetxt(vecs_path, sub_matrix, delimiter="\t", fmt="%.5f")
 
-    # 4) L2-normalize rows and save normalized vectors
+    # L2-normalize rows and save normalized vectors
     norms = np.linalg.norm(sub_matrix, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     sub_matrix_norm = sub_matrix / norms
@@ -252,7 +252,6 @@ def main():
         max_rows=30000,
     )
 
-    # plot norms of the normalized file just to verify ~1
     norms = np.linalg.norm(svd_mat, axis=1)
     plt.figure(figsize=(8, 6))
     plt.hist(norms, bins=50, color="blue", alpha=0.7)

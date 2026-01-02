@@ -7,7 +7,6 @@ import logging
 import random
 from scipy.stats import spearmanr
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class SemanticEvaluator:
@@ -16,6 +15,23 @@ class SemanticEvaluator:
         sample_word = next(iter(vocab))
         self.is_lower_vocab = sample_word.islower() and not sample_word.isupper()
     
+    def _spearman_permutation_test(self, human, model, n_perm=1000, seed=42):
+        rng = np.random.default_rng(seed)
+
+        rho_obs = spearmanr(human, model)[0]
+        if np.isnan(rho_obs):
+            return rho_obs, 1.0
+
+        perm_rhos = np.empty(n_perm)
+        model = np.array(model)
+
+        for i in range(n_perm):
+            permuted = rng.permutation(model)
+            perm_rhos[i] = spearmanr(human, permuted)[0]
+
+        # two-sided p-value
+        p_value = (1 + np.sum(np.abs(perm_rhos) >= abs(rho_obs))) / (1 + n_perm)
+        return rho_obs, p_value
     def _cosine_sim_batch(self, matrix, pairs):
         is_sparse = sp.issparse(matrix)
         if is_sparse:
@@ -46,30 +62,52 @@ class SemanticEvaluator:
             else:
                 sim = float(np.dot(norm_matrix[idx1], norm_matrix[idx2]))
             model_scores.append(sim)
-        
-        return spearmanr(human_scores, model_scores)[0], len(human_scores)
+        rho, pval = self._spearman_permutation_test(human_scores,model_scores,n_perm=1000)
+        return (rho, pval), len(human_scores)
     
     def evaluate_wordsim(self, matrix, path):
         if not os.path.exists(path):
             logging.warning(f"WordSim path not found: {path}")
-            return 0.0, 0
+            return (0.0, 1.0), 0
+
         try:
             df = pd.read_csv(path)
             cols = [c.lower().strip() for c in df.columns]
             df.columns = cols
-            w1_col = next((c for c in cols if 'word 1' in c or 'word1' in c), df.columns[0] if len(df.columns)>0 else None)
-            w2_col = next((c for c in cols if 'word 2' in c or 'word2' in c), df.columns[1] if len(df.columns)>1 else None)
-            score_col = next((c for c in cols if 'human' in c or 'score' in c), df.columns[2] if len(df.columns)>2 else None)
-            
-            if not all([w1_col, w2_col, score_col]): return 0.0, 0
-            
+
+            w1_col = next(
+                (c for c in cols if 'word 1' in c or 'word1' in c),
+                df.columns[0] if len(df.columns) > 0 else None
+            )
+            w2_col = next(
+                (c for c in cols if 'word 2' in c or 'word2' in c),
+                df.columns[1] if len(df.columns) > 1 else None
+            )
+            score_col = next(
+                (c for c in cols if 'human' in c or 'score' in c),
+                df.columns[2] if len(df.columns) > 2 else None
+            )
+
+            if not all([w1_col, w2_col, score_col]):
+                return (0.0, 1.0), 0
+
             pairs = []
             for _, row in df.iterrows():
-                try: pairs.append((str(row[w1_col]), str(row[w2_col]), float(row[score_col])))
-                except: continue
+                try:
+                    pairs.append((
+                        str(row[w1_col]),
+                        str(row[w2_col]),
+                        float(row[score_col])
+                    ))
+                except Exception:
+                    continue
+
             return self._cosine_sim_batch(matrix, pairs)
-        except Exception:
-            return 0.0, 0
+
+        except Exception as e:
+            logging.error(f"WordSim evaluation failed: {e}")
+            return (0.0, 1.0), 0
+
 
 class AnalogyEvaluator:
     def __init__(self, vocab):
@@ -77,7 +115,6 @@ class AnalogyEvaluator:
         sample_word = next(iter(vocab))
         self.is_lower_vocab = sample_word.islower() and not sample_word.isupper()
     
-    # FIX: Added method argument
     def evaluate_analogy(self, matrix, analogy_path, method='3cosadd'):
         if not os.path.exists(analogy_path): return 0.0, 0
         is_sparse = sp.issparse(matrix)
@@ -121,67 +158,98 @@ class AnalogyEvaluator:
             return correct/total if total else 0, total
         except Exception: return 0.0, 0
 
-class OutlierDetectionEvaluator:
+class CamachoColladosOutlierEvaluator:
+    """implementation of:
+    Camacho-Collados & Navigli (2015)
+    'A Framework for the Evaluation of Distributional Semantic Models'
+    """
+
     def __init__(self, vocab):
         self.vocab = vocab
-        sample_word = next(iter(vocab))
-        self.is_lower_vocab = sample_word.islower() and not sample_word.isupper()
-    
-    def evaluate_outlier_detection(self, matrix, outlier_path):
-        if not os.path.exists(outlier_path): return 0.0, 0
-        
+        sample = next(iter(vocab))
+        self.is_lower_vocab = sample.islower() and not sample.isupper()
+
+    def evaluate(self, matrix, outlier_path):
+        if not os.path.exists(outlier_path):
+            return 0.0, 0
+
         is_sparse = sp.issparse(matrix)
         if is_sparse:
             norms = sp.linalg.norm(matrix, axis=1)
-            norms[norms == 0] = 1
-            norm_matrix = sp.diags(1.0 / norms) @ matrix
+            norms[norms == 0] = 1.0
+            M = sp.diags(1.0 / norms) @ matrix
         else:
             norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-            norms[norms == 0] = 1
-            norm_matrix = matrix / norms
+            norms[norms == 0] = 1.0
+            M = matrix / norms
 
-        results = []
-        try:
-            with open(outlier_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) == 9:
-                        cluster_words = parts[:-1]
-                        target = parts[-1]
-                    elif len(parts) == 8:
-                        cluster_words = parts
-                        target = parts[-1]
-                    else:
-                        continue
-                        
-                    if self.is_lower_vocab:
-                        cluster_words = [w.lower() for w in cluster_words]
-                        target = target.lower()
-                    
-                    valid_words = [w for w in cluster_words if w in self.vocab]
-                    if len(valid_words) < 3: continue 
-                    if target not in self.vocab: continue
-                    
-                    target_idx = self.vocab[target]
-                    indices = [self.vocab[w] for w in valid_words]
-                    
-                    vecs = norm_matrix[indices]
-                    if is_sparse: vecs = vecs.toarray()
-                    
-                    sim_matrix = np.dot(vecs, vecs.T)
-                    compactness = []
-                    for i in range(len(valid_words)):
-                        score = (np.sum(sim_matrix[i]) - 1.0) / (len(valid_words) - 1)
-                        compactness.append(score)
-                    
-                    pred_idx_local = np.argmin(compactness)
-                    pred_idx_global = indices[pred_idx_local]
-                    results.append(1 if pred_idx_global == target_idx else 0)
-                    
-            return np.mean(results) if results else 0.0, len(results)
-        except Exception as e:
-            logging.error(f"Outlier eval error: {e}")
-            return 0.0, 0
+        correct = 0
+        total = 0
+
+        with open(outlier_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+
+                # supports:
+                # 8 cluster + 1 outlier
+                # 8 cluster + 1 outlier + Ck
+                if len(parts) not in (9, 10):
+                    continue
+
+                cluster_words = parts[:8]
+                outlier = parts[8]
+
+                if self.is_lower_vocab:
+                    cluster_words = [w.lower() for w in cluster_words]
+                    outlier = outlier.lower()
+
+                if outlier not in self.vocab:
+                    continue
+
+                cluster_words = [w for w in cluster_words if w in self.vocab]
+                if len(cluster_words) < 3:
+                    continue
+
+                cluster_idx = [self.vocab[w] for w in cluster_words]
+                outlier_idx = self.vocab[outlier]
+
+                C = M[cluster_idx]
+                o = M[outlier_idx]
+
+                if is_sparse:
+                    C = C.toarray()
+                    o = o.toarray().ravel()
+
+                sim_cc = C @ C.T            # cluster–cluster
+                sim_co = C @ o              # cluster–outlier
+
+                compactness = {}
+
+
+                for i, w in enumerate(cluster_words):
+                    # sum of similarities with cluster + outlier
+                    score = sim_co[i] + (np.sum(sim_cc[i]) - 1.0)
+                    compactness[w] = score
+
+                # outlier
+                compactness[outlier] = np.sum(sim_co)
+
+                # rank (descending compactness) 
+                ranked = sorted(
+                    compactness.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+
+                position = [w for w, _ in ranked].index(outlier)
+
+                # correct iff outlier is at the end
+                if position == len(cluster_words):
+                    correct += 1
+
+                total += 1
+
+        return (correct / total) if total > 0 else 0.0, total
 
 class StabilityEvaluator:
     def __init__(self, vocab):
@@ -195,7 +263,7 @@ class MetricsCalculator:
         self.inverse_vocab = inverse_vocab
         self.semantic_eval = SemanticEvaluator(vocab)
         self.analogy_eval = AnalogyEvaluator(vocab)
-        self.outlier_eval = OutlierDetectionEvaluator(vocab)
+        self.outlier_eval = CamachoColladosOutlierEvaluator(vocab)
         self.stability_eval = StabilityEvaluator(vocab)
 
 def load_vocab_list(path):
@@ -210,14 +278,40 @@ def load_vocab_list(path):
     return vocab, inverse_vocab
 
 def generate_888_dataset(source_dir, output_file):
-    # Same generation logic as before, omitted for brevity but included in full file if needed
-    pass 
+    with open(output_file, "w") as out:
+        for fname in os.listdir(source_dir):
+            if not fname.endswith(".txt"):
+                continue
+
+            lines = open(os.path.join(source_dir, fname),
+                         encoding="utf-8").read().splitlines()
+
+            sep = lines.index("")
+            cluster = lines[:sep]
+            outliers = lines[sep+1:]
+
+            for i, o in enumerate(outliers):
+                if i < 2:
+                    cat = "C1"
+                elif i < 4:
+                    cat = "C2"
+                elif i < 6:
+                    cat = "C3"
+                else:
+                    cat = "C4"
+
+                out.write(" ".join(cluster + [o, cat]) + "\n")
 
 def main():
     BASE_OUTPUT_DIR = "./data/results4"
     MATRICES_DIR = os.path.join(BASE_OUTPUT_DIR, "matrices")
     DATASETS_DIR = "./data/datasets"
-    
+    #generate_888_dataset if it doesnt exist
+    if not os.path.exists(os.path.join(DATASETS_DIR, "8-8-8_outliers.txt")):
+        generate_888_dataset(
+             "data/datasets/8-8-8_Dataset",
+            os.path.join(DATASETS_DIR, "8-8-8_outliers.txt")
+        )
     WORDSIM_PATH = os.path.join(DATASETS_DIR, "wordsim353.csv")
     ANALOGY_PATH = os.path.join(DATASETS_DIR, "google_analogy.txt")
     OUTLIER_PATH = os.path.join(DATASETS_DIR, "8-8-8_outliers.txt")
@@ -233,27 +327,56 @@ def main():
             matrix = np.load(matrix_file)
             
             calc = MetricsCalculator(vocab, inverse_vocab)
-            
-            ws_corr, ws_cnt = calc.semantic_eval.evaluate_wordsim(matrix, WORDSIM_PATH)
+
+            (ws_corr, ws_pval), ws_cnt = calc.semantic_eval.evaluate_wordsim(matrix, WORDSIM_PATH)
             analogy_acc, an_cnt = calc.analogy_eval.evaluate_analogy(matrix, ANALOGY_PATH, method="3cosadd")
-            outlier_acc, out_cnt = calc.outlier_eval.evaluate_outlier_detection(matrix, OUTLIER_PATH)
-            
-            print(f"  WordSim353: {ws_corr:.4f} (n={ws_cnt})")
+
+            outlier_acc, out_cnt = calc.outlier_eval.evaluate(matrix, OUTLIER_PATH)
+
+            print(f"[Results] Window={w} (SVD Pruned)")
+
+            print(
+                f"WordSim353: rho={ws_corr:.4f}, "
+                f"p={ws_pval:.4g}, "
+                f"n={ws_cnt}"
+            )
             print(f"  Analogy:    {analogy_acc:.4f} (n={an_cnt})")
             print(f"  Outlier:    {outlier_acc:.4f} (n={out_cnt})")
+
+        vocab_file = os.path.join(MATRICES_DIR, f"vocab_pruned_w{w}.txt")
+        matrix_file = os.path.join(MATRICES_DIR, f"ppmi_pruned_w{w}.npz")
+        
+        if os.path.exists(vocab_file) and os.path.exists(matrix_file):
+            print(f"\nEvaluating Pruned Model W={w}...")
+            vocab, inverse_vocab = load_vocab_list(vocab_file)
+            matrix = sp.load_npz(matrix_file)
+            
+            calc = MetricsCalculator(vocab, inverse_vocab)
+
+            (ws_corr, ws_pval), ws_cnt = calc.semantic_eval.evaluate_wordsim(matrix, WORDSIM_PATH)
+            analogy_acc, an_cnt = calc.analogy_eval.evaluate_analogy(matrix, ANALOGY_PATH, method="3cosadd")
+            outlier_acc, out_cnt = calc.outlier_eval.evaluate(matrix, OUTLIER_PATH)
+            print(f"[Results] Window={w} (PPMI Pruned)")
+            print(
+                f"WordSim353: rho={ws_corr:.4f}, "
+                f"p={ws_pval:.4g}, "
+                f"n={ws_cnt}"
+            )
+            print(f"  Analogy:    {analogy_acc:.4f} (n={an_cnt})")
+            print(f"  Outlier:    {outlier_acc:.4f} (n={out_cnt})")    
 
 if __name__ == "__main__":
     main()
 
 
 
+# this is for evaluating co-occ matrix and svd during training (semantic/stability) 
 
 # import os
 # import numpy as np
 # import scipy.sparse as sp
 # import pandas as pd
 # from scipy.stats import spearmanr
-
 
 # class SemanticEvaluator:
 #     def __init__(self, vocab):
